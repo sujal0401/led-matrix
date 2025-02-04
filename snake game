@@ -1,0 +1,197 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <MD_Parola.h>
+#include <MD_MAX72XX.h>
+#include <SPI.h>
+
+// MAX7219 LED Matrix Settings
+#define MAX_DEVICES 4
+#define CS_PIN 5
+MD_MAX72XX mx(MD_MAX72XX::FC16_HW, CS_PIN, MAX_DEVICES);
+
+// WiFi Credentials (Modify if needed)
+const char* ssid = "ESP32_Snake";
+const char* password = "12345678";
+
+WebServer server(80);  // Web server on port 80
+
+#define MATRIX_WIDTH (MAX_DEVICES * 8)
+#define MATRIX_HEIGHT 8
+
+struct Point {
+  int x, y;
+};
+
+Point snake[32]; 
+int snakeLength = 3;
+Point food;
+int direction = 3;  // 0 = Up, 1 = Down, 2 = Left, 3 = Right
+int score = 0;
+bool gameOver = false;
+
+void setup() {
+  Serial.begin(115200);
+  mx.begin();
+  randomSeed(analogRead(0));
+
+  // Start WiFi Access Point
+  WiFi.softAP(ssid, password);
+  Serial.println("✅ WiFi AP Started!");
+  Serial.println("📡 Connect to WiFi: ESP32_Snake");
+  Serial.println("🔗 Open URL in browser: http://192.168.4.1");
+
+  // Define web server routes
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/up", HTTP_GET, [](){ if (!gameOver) direction = 0; server.send(200, "text/plain", "Up"); });
+  server.on("/down", HTTP_GET, [](){ if (!gameOver) direction = 1; server.send(200, "text/plain", "Down"); });
+  server.on("/left", HTTP_GET, [](){ if (!gameOver) direction = 3; server.send(200, "text/plain", "Left"); });
+  server.on("/right", HTTP_GET, [](){ if (!gameOver) direction = 2; server.send(200, "text/plain", "Right"); });
+
+  server.begin();
+  initializeGame();
+}
+
+void initializeGame() {
+  snake[0] = {4, 4};
+  snake[1] = {3, 4};
+  snake[2] = {2, 4};
+  generateFood();
+  score = 0;
+  gameOver = false;
+}
+
+void generateFood() {
+  food.x = random(0, MATRIX_WIDTH);
+  food.y = random(0, MATRIX_HEIGHT);
+}
+
+void updateGame() {
+  if (gameOver) return;
+
+  // Check for self-collision
+  for (int i = 1; i < snakeLength; i++) {
+    if (snake[i].x == snake[0].x && snake[i].y == snake[0].y) {
+      gameOver = true;
+      return;
+    }
+  }
+
+  for (int i = snakeLength - 1; i > 0; i--) {
+    snake[i] = snake[i - 1];
+  }
+
+  if (direction == 0) snake[0].y--;
+  if (direction == 1) snake[0].y++;
+  if (direction == 2) snake[0].x--;
+  if (direction == 3) snake[0].x++;
+
+  // Screen Wrapping
+  if (snake[0].x < 0) snake[0].x = MATRIX_WIDTH - 1;
+  if (snake[0].x >= MATRIX_WIDTH) snake[0].x = 0;
+  if (snake[0].y < 0) snake[0].y = MATRIX_HEIGHT - 1;
+  if (snake[0].y >= MATRIX_HEIGHT) snake[0].y = 0;
+
+  // Food Collision - Grow Snake
+  if (snake[0].x == food.x && snake[0].y == food.y) {
+    snakeLength++;
+    score++;
+    generateFood();
+  }
+}
+
+void drawGame() {
+  mx.clear();
+  for (int i = 0; i < snakeLength; i++) {
+    mx.setPoint(snake[i].y, snake[i].x, true);
+  }
+  mx.setPoint(food.y, food.x, true);
+  mx.update();
+}
+
+void drawGameOver() {
+  mx.clear();
+  
+  // Display "Game Over" and Score
+  displayText("GAME OVER", 0, 0);  
+  delay(1000);
+  mx.clear();
+  displayText("SCORE: " + String(score), 0, 0);  
+  mx.update();
+  delay(3000);
+}
+
+void displayText(String text, int x, int y) {
+  int len = text.length();
+  for (int i = 0; i < len; i++) {
+    // Use 'setPoint' to manually print each character to the matrix
+    char c = text.charAt(i);
+    for (int j = 0; j < 8; j++) {  // Display each character within an 8x8 box
+      for (int k = 0; k < 8; k++) {
+        // Manually set the pixels for each character
+        // Replace the code here to use custom bitmaps if needed
+        mx.setPoint(x + i * 8 + j, y + k, (c & (1 << (7 - j))) ? true : false);
+      }
+    }
+  }
+}
+
+void loop() {
+  server.handleClient();
+  if (!gameOver) {
+    updateGame();
+    drawGame();
+  } else {
+    drawGameOver();
+    initializeGame(); // Restart game after showing the game over screen
+  }
+  delay(200);
+}
+
+// Serve HTML Page with Simple Text Buttons and Score Display
+void handleRoot() {
+  String page = R"rawliteral(
+  <!DOCTYPE html>
+  <html>
+  <head>
+      <title>Snake Game Controller</title>
+      <style>
+          body { text-align: center; font-family: Arial, sans-serif; background: #222; color: white; }
+          .container { display: flex; flex-direction: column; align-items: center; margin-top: 30px; }
+          .row { display: flex; justify-content: center; }
+          .btn { font-size: 20px; padding: 20px; margin: 5px; width: 100px; height: 60px; 
+                 background: #333; color: white; border: 2px solid #555; cursor: pointer; border-radius: 10px; }
+          .btn:hover { background: #444; }
+          .score { font-size: 24px; margin-top: 20px; }
+      </style>
+  </head>
+  <body>
+      <h2>ESP32 Snake Game Controller</h2>
+      <div class="container">
+          <div class="row">
+              <button class="btn" onclick="sendCommand('up')">Up</button>
+          </div>
+          <div class="row">
+              <button class="btn" onclick="sendCommand('left')">Left</button>
+              <button class="btn" onclick="sendCommand('right')">Right</button>
+          </div>
+          <div class="row">
+              <button class="btn" onclick="sendCommand('down')">Down</button>
+          </div>
+          <div class="score">
+              <p>Score: <span id="score">0</span></p>
+          </div>
+      </div>
+      <script>
+          function sendCommand(direction) {
+              fetch('/' + direction);
+          }
+      </script>
+  </body>
+  </html>
+  )rawliteral";
+
+  // Update score dynamically
+  page.replace("<span id=\"score\">0</span>", "<span id=\"score\">" + String(score) + "</span>");
+
+  server.send(200, "text/html", page);
+}
